@@ -1,6 +1,6 @@
 from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -13,7 +13,7 @@ from cheetah.accelerator.element import Element
 from cheetah.accelerator.marker import Marker
 from cheetah.converters import bmad, elegant, nxtables
 from cheetah.latticejson import load_cheetah_model, save_cheetah_model
-from cheetah.particles import Beam
+from cheetah.particles import Beam, Species
 from cheetah.utils import UniqueNameGenerator
 
 generate_unique_name = UniqueNameGenerator(prefix="unnamed_element")
@@ -27,10 +27,10 @@ class Segment(Element):
     :param name: Unique identifier of the element.
     """
 
-    def __init__(self, elements: list[Element], name: Optional[str] = None) -> None:
+    def __init__(self, elements: list[Element], name: str | None = None) -> None:
         super().__init__(name=name)
 
-        self.elements = nn.ModuleList(elements)
+        self.register_module("elements", nn.ModuleList(elements))
 
         for element in self.elements:
             # Make elements accessible via .name attribute. If multiple elements have
@@ -43,17 +43,52 @@ class Segment(Element):
             else:
                 self.__dict__[element.name] = element
 
-    def subcell(self, start: str, end: str) -> "Segment":
-        """Extract a subcell `[start, end]` from an this segment."""
+    def subcell(
+        self,
+        start: str | None = None,
+        end: str | None = None,
+        include_start: bool = True,
+        include_end: bool = True,
+    ) -> "Segment":
+        """
+        Extract a subcell from this segment.
+
+        If either `start` or `end` is `None`, the subcell starts or ends at the same
+        element as the original segment. If `start` or `end` is not part of the segment,
+        a `ValueError` is raised.
+
+        :param start: Name of the element at the start of the subcell. If `None` is
+            passed, the subcell starts at the same element as the original segment.
+        :param end: Name of the element at the end of the subcell. If `None` is
+            passed, the subcell ends at the same element as the original segment.
+        :param include_start: If `True`, `start` is included in the subcell, otherwise
+            not.
+        :param include_end: If `True`, `end` is included in the subcell, otherwise not.
+        :return: Subcell of elements from `start` to `end`.
+        """
+        is_start_in_segment = start is None or start in self.__dict__
+        if not is_start_in_segment:
+            raise ValueError(f"Element {start} is not part of the segment.")
+        is_end_in_segment = end is None or end in self.__dict__
+        if not is_end_in_segment:
+            raise ValueError(f"Element {end} is not part of the segment.")
+
         subcell = []
-        is_in_subcell = False
+        is_in_subcell = start is None
         for element in self.elements:
             if element.name == start:
                 is_in_subcell = True
+                if include_start:
+                    subcell.append(element)
+                continue
+
+            if element.name == end:
+                if include_end and is_in_subcell:
+                    subcell.append(element)
+                break
+
             if is_in_subcell:
                 subcell.append(element)
-            if element.name == end:
-                break
 
         return self.__class__(subcell)
 
@@ -72,7 +107,7 @@ class Segment(Element):
         return Segment(elements=flattened_elements, name=self.name)
 
     def transfer_maps_merged(
-        self, incoming_beam: Beam, except_for: Optional[list[str]] = None
+        self, incoming_beam: Beam, except_for: list[str] | None = None
     ) -> "Segment":
         """
         Return a segment where the transfer maps of skipable elements are merged into
@@ -122,7 +157,7 @@ class Segment(Element):
         return Segment(elements=merged_elements, name=self.name)
 
     def without_inactive_markers(
-        self, except_for: Optional[list[str]] = None
+        self, except_for: list[str] | None = None
     ) -> "Segment":
         """
         Return a segment where all inactive markers are removed. This can be used to
@@ -149,7 +184,7 @@ class Segment(Element):
         )
 
     def without_inactive_zero_length_elements(
-        self, except_for: Optional[list[str]] = None
+        self, except_for: list[str] | None = None
     ) -> "Segment":
         """
         Return a segment where all inactive zero length elements are removed. This can
@@ -177,7 +212,7 @@ class Segment(Element):
         )
 
     def inactive_elements_as_drifts(
-        self, except_for: Optional[list[str]] = None
+        self, except_for: list[str] | None = None
     ) -> "Segment":
         """
         Return a segment where all inactive elements (that have a length) are replaced
@@ -213,19 +248,26 @@ class Segment(Element):
         )
 
     @classmethod
-    def from_lattice_json(cls, filepath: str) -> "Segment":
+    def from_lattice_json(
+        cls,
+        filepath: str,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> "Segment":
         """
         Load a Cheetah model from a JSON file.
 
-        :param filename: Name/path of the file to load the lattice from.
+        :param filepath: Path of the file to load the lattice from.
+        :param device: Device to place the lattice elements on.
+        :param dtype: Data type to use for the lattice elements.
         :return: Loaded Cheetah `Segment`.
         """
-        return load_cheetah_model(filepath)
+        return load_cheetah_model(filepath, device=device, dtype=dtype)
 
     def to_lattice_json(
         self,
         filepath: str,
-        title: Optional[str] = None,
+        title: str | None = None,
         info: str = "This is a placeholder lattice description",
     ) -> None:
         """
@@ -244,10 +286,10 @@ class Segment(Element):
     def from_ocelot(
         cls,
         cell,
-        name: Optional[str] = None,
+        name: str | None = None,
         warnings: bool = True,
-        device=None,
-        dtype=torch.float32,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
         **kwargs,
     ) -> "Segment":
         """
@@ -263,6 +305,8 @@ class Segment(Element):
         :param name: Unique identifier for the entire segment.
         :param warnings: Whether to print warnings when objects are not supported by
             Cheetah or converted with potentially unexpected behavior.
+        :param device: Device to place the lattice elements on.
+        :param dtype: Data type to use for the lattice elements.
         :return: Cheetah segment closely resembling the Ocelot cell.
         """
         from cheetah.converters import ocelot
@@ -279,9 +323,9 @@ class Segment(Element):
     def from_bmad(
         cls,
         bmad_lattice_file_path: str,
-        environment_variables: Optional[dict] = None,
-        device: Optional[Union[str, torch.device]] = None,
-        dtype: torch.dtype = torch.float32,
+        environment_variables: dict | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ) -> "Segment":
         """
         Read a Cheetah segment from a Bmad lattice file.
@@ -308,8 +352,8 @@ class Segment(Element):
         cls,
         elegant_lattice_file_path: str,
         name: str,
-        device: Optional[Union[str, torch.device]] = None,
-        dtype: torch.dtype = torch.float32,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ) -> "Segment":
         """
         Read a Cheetah segment from an elegant lattice file.
@@ -327,7 +371,7 @@ class Segment(Element):
         )
 
     @classmethod
-    def from_nx_tables(cls, filepath: Union[Path, str]) -> "Element":
+    def from_nx_tables(cls, filepath: Path | str) -> "Element":
         """
         Read an NX Tables CSV-like file generated for the ARES lattice into a Cheetah
         `Segment`.
@@ -351,11 +395,11 @@ class Segment(Element):
         lengths = [element.length for element in self.elements]
         return reduce(torch.add, lengths)
 
-    def transfer_map(self, energy: torch.Tensor) -> torch.Tensor:
+    def transfer_map(self, energy: torch.Tensor, species: Species) -> torch.Tensor:
         if self.is_skippable:
             tm = torch.eye(7, device=energy.device, dtype=energy.dtype)
             for element in self.elements:
-                tm = torch.matmul(element.transfer_map(energy), tm)
+                tm = torch.matmul(element.transfer_map(energy, species), tm)
             return tm
         else:
             return None
@@ -365,13 +409,24 @@ class Segment(Element):
             return super().track(incoming)
         else:
             todos = []
+            continuous_skippable_elements = []
             for element in self.elements:
-                if not element.is_skippable:
-                    todos.append(element)
-                elif not todos or not todos[-1].is_skippable:
-                    todos.append(Segment([element], name="temporary_todo"))
+                if element.is_skippable:
+                    # Collect skippable elements until a non-skippable element is found
+                    continuous_skippable_elements.append(element)
                 else:
-                    todos[-1].elements.append(element)
+                    # If a non-skippable element is found, merge the skippable elements
+                    # and append them before the non-skippable element
+                    if len(continuous_skippable_elements) > 0:
+                        todos.append(Segment(elements=continuous_skippable_elements))
+                        continuous_skippable_elements = []
+
+                    todos.append(element)
+
+            # If there are still skippable elements at the end of the segment append
+            # them as well
+            if len(continuous_skippable_elements) > 0:
+                todos.append(Segment(elements=continuous_skippable_elements))
 
             for todo in todos:
                 incoming = todo.track(incoming)
@@ -390,7 +445,7 @@ class Segment(Element):
             for split_element in element.split(resolution)
         ]
 
-    def plot(self, ax: plt.Axes, s: float, vector_idx: Optional[tuple] = None) -> None:
+    def plot(self, ax: plt.Axes, s: float, vector_idx: tuple | None = None) -> None:
         element_lengths = [element.length for element in self.elements]
         element_ss = [torch.tensor(0.0)] + [
             sum(element_lengths[: i + 1]) for i, _ in enumerate(element_lengths)
@@ -415,25 +470,23 @@ class Segment(Element):
         ax.set_xlabel("s (m)")
         ax.set_yticks([])
 
-    def plot_reference_particle_traces(
+    def plot_mean_and_std(
         self,
         axx: plt.Axes,
         axy: plt.Axes,
         incoming: Beam,
-        num_particles: int = 10,
         resolution: float = 0.01,
-        vector_idx: Optional[tuple] = None,
+        vector_idx: tuple | None = None,
     ) -> None:
         """
-        Plot `n` reference particles along the segment view in x- and y-direction.
+        Plot the mean (i.e. beam position) and standard deviation (i.e. beam size) of
+        the beam along the segment view in x- and y-direction.
 
         :param axx: Axes to plot the particle traces into viewed in x-direction.
         :param axy: Axes to plot the particle traces into viewed in y-direction.
-        :param incoming: Entering beam from which the reference particles are sampled.
-        :param num_particles: Number of reference particles to plot. Must not be larger
-            than number of particles passed in `beam`.
-        :param resolution: Minimum resolution of the tracking of the reference particles
-            in the plot.
+        :param incoming: Entering beam for which the position and size are shown
+        :param resolution: Minimum resolution of the tracking of the beam position and
+            beam size in the plot.
         :param vector_idx: Index of the vector dimension to plot. If the model has more
             than one vector dimension, this can be used to select a specific one. In the
             case of present vector dimension but no index provided, the first one is
@@ -448,67 +501,95 @@ class Segment(Element):
         ]
         broadcast_ss = torch.broadcast_tensors(*ss)
         stacked_ss = torch.stack(broadcast_ss)
-        dimensions_reordered_ss = stacked_ss.movedim(0, -1)  # Place vector dims first
+        dimension_reordered_ss = stacked_ss.movedim(0, -1)  # Place vector dims first
 
-        references = [incoming.linspaced(num_particles)]
+        references = [incoming]
         for split in splits:
             sample = split(references[-1])
             references.append(sample)
 
-        xs = [reference_beam.x for reference_beam in references]
-        broadcast_xs = torch.broadcast_tensors(*xs)
-        stacked_xs = torch.stack(broadcast_xs)
-        dimension_reordered_xs = stacked_xs.movedim(0, -1)  # Place vector dims first
+        x_means = [reference_beam.mu_x for reference_beam in references]
+        broadcast_x_means = torch.broadcast_tensors(*x_means)
+        stacked_x_means = torch.stack(broadcast_x_means)
+        dimension_reordered_x_means = stacked_x_means.movedim(
+            0, -1
+        )  # Place vector dims first
+        x_stds = [reference_beam.sigma_x for reference_beam in references]
+        broadcast_x_stds = torch.broadcast_tensors(*x_stds)
+        stacked_x_stds = torch.stack(broadcast_x_stds)
+        dimension_reordered_x_stds = stacked_x_stds.movedim(
+            0, -1
+        )  # Place vector dims first
 
-        ys = [reference_beam.y for reference_beam in references]
-        broadcast_ys = torch.broadcast_tensors(*ys)
-        stacked_ys = torch.stack(broadcast_ys)
-        dimension_reordered_ys = stacked_ys.movedim(0, -1)  # Place vector dims first
+        y_means = [reference_beam.mu_y for reference_beam in references]
+        broadcast_y_means = torch.broadcast_tensors(*y_means)
+        stacked_y_means = torch.stack(broadcast_y_means)
+        dimension_reordered_y_means = stacked_y_means.movedim(
+            0, -1
+        )  # Place vector dims first
+        y_stds = [reference_beam.sigma_y for reference_beam in references]
+        broadcast_y_stds = torch.broadcast_tensors(*y_stds)
+        stacked_y_stds = torch.stack(broadcast_y_stds)
+        dimension_reordered_y_stds = stacked_y_stds.movedim(
+            0, -1
+        )  # Place vector dims first
 
         plot_ss = (
-            dimensions_reordered_ss[vector_idx]
+            dimension_reordered_ss[vector_idx]
             if stacked_ss.dim() > 1
-            else dimensions_reordered_ss
+            else dimension_reordered_ss
         ).detach()
-        plot_xs = (
-            dimension_reordered_xs[vector_idx]
-            if stacked_xs.dim() > 2
-            else dimension_reordered_xs
+        plot_x_means = (
+            dimension_reordered_x_means[vector_idx]
+            if stacked_x_means.dim() > 2
+            else dimension_reordered_x_means
         ).detach()
-        plot_ys = (
-            dimension_reordered_ys[vector_idx]
-            if stacked_ys.dim() > 2
-            else dimension_reordered_ys
+        plot_x_stds = (
+            dimension_reordered_x_stds[vector_idx]
+            if stacked_x_stds.dim() > 2
+            else dimension_reordered_x_stds
+        ).detach()
+        plot_y_means = (
+            dimension_reordered_y_means[vector_idx]
+            if stacked_y_means.dim() > 2
+            else dimension_reordered_y_means
+        ).detach()
+        plot_y_stds = (
+            dimension_reordered_y_stds[vector_idx]
+            if stacked_y_stds.dim() > 2
+            else dimension_reordered_y_stds
         ).detach()
 
-        for particle_idx in range(num_particles):
-            axx.plot(plot_ss, plot_xs[particle_idx])
-            axy.plot(plot_ss, plot_ys[particle_idx])
+        axx.plot(plot_ss, plot_x_means)
+        axx.fill_between(
+            plot_ss, plot_x_means - plot_x_stds, plot_x_means + plot_x_stds, alpha=0.4
+        )
+
+        axy.plot(plot_ss, plot_y_means)
+        axy.fill_between(
+            plot_ss, plot_y_means - plot_y_stds, plot_y_means + plot_y_stds, alpha=0.4
+        )
 
         axx.set_xlabel("s (m)")
         axx.set_ylabel("x (m)")
-        axx.grid()
         axx.set_xlabel("s (m)")
         axy.set_ylabel("y (m)")
-        axy.grid()
 
     def plot_overview(
         self,
         incoming: Beam,
-        fig: Optional[matplotlib.figure.Figure] = None,
-        num_particles: int = 10,
+        fig: matplotlib.figure.Figure | None = None,
         resolution: float = 0.01,
-        vector_idx: Optional[tuple] = None,
+        vector_idx: tuple | None = None,
     ) -> None:
         """
-        Plot an overview of the segment with the lattice and traced reference particles.
+        Plot an overview of the segment with the lattice along with the beam position
+        and size.
 
-        :param incoming: Entering beam from which the reference particles are sampled.
+        :param incoming: Entering beam for which the position and size are shown.
         :param fig: Figure to plot the overview into.
-        :param num_particles: Number of reference particles to plot. Must not be larger
-            than number of particles passed in `beam`.
-        :param resolution: Minimum resolution of the tracking of the reference particles
-            in the plot.
+        :param resolution: Minimum resolution of the tracking of the beam position and
+            beam size in the plot.
         :param vector_idx: Index of the vector dimension to plot. If the model has more
             than one vector dimension, this can be used to select a specific one. In the
             case of present vector dimension but no index provided, the first one is
@@ -519,12 +600,11 @@ class Segment(Element):
         gs = fig.add_gridspec(3, hspace=0, height_ratios=[2, 2, 1])
         axs = gs.subplots(sharex=True)
 
-        axs[0].set_title("Reference Particle Traces")
-        self.plot_reference_particle_traces(
+        axs[0].set_title("Beam Position and Size")
+        self.plot_mean_and_std(
             axx=axs[0],
             axy=axs[1],
             incoming=incoming,
-            num_particles=num_particles,
             resolution=resolution,
             vector_idx=vector_idx,
         )
@@ -534,15 +614,12 @@ class Segment(Element):
         plt.tight_layout()
 
     def plot_twiss(
-        self,
-        incoming: Beam,
-        ax: Optional[Any] = None,
-        vector_idx: Optional[tuple] = None,
+        self, incoming: Beam, ax: Any | None = None, vector_idx: tuple | None = None
     ) -> None:
         """Plot twiss parameters along the segment."""
         longitudinal_beams = [incoming]
         s_positions = [torch.tensor(0.0)]
-        for element in self.elements:
+        for element in self.flattened().elements:
             if torch.all(element.length == 0):
                 continue
 

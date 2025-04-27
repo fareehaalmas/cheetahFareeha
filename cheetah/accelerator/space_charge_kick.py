@@ -1,5 +1,3 @@
-from typing import Optional
-
 import matplotlib.pyplot as plt
 import torch
 from scipy.constants import elementary_charge, epsilon_0, speed_of_light
@@ -54,9 +52,9 @@ class SpaceChargeKick(Element):
         grid_extend_x: torch.Tensor = 3,  # TODO: Simplify these to a single tensor?
         grid_extend_y: torch.Tensor = 3,
         grid_extend_tau: torch.Tensor = 3,
-        name: Optional[str] = None,
-        device=None,
-        dtype=None,
+        name: str | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         device, dtype = verify_device_and_dtype([effect_length], device, dtype)
         self.factory_kwargs = {"device": device, "dtype": dtype}
@@ -65,16 +63,19 @@ class SpaceChargeKick(Element):
 
         self.grid_shape = (num_grid_points_x, num_grid_points_y, num_grid_points_tau)
 
-        self.register_buffer("effect_length", None)
+        self.register_buffer_or_parameter(
+            "effect_length", torch.as_tensor(effect_length, **self.factory_kwargs)
+        )
         # In multiples of sigma
-        self.register_buffer("grid_extend_x", None)
-        self.register_buffer("grid_extend_y", None)
-        self.register_buffer("grid_extend_tau", None)
-
-        self.effect_length = torch.as_tensor(effect_length, **self.factory_kwargs)
-        self.grid_extend_x = torch.as_tensor(grid_extend_x, **self.factory_kwargs)
-        self.grid_extend_y = torch.as_tensor(grid_extend_y, **self.factory_kwargs)
-        self.grid_extend_tau = torch.as_tensor(grid_extend_tau, **self.factory_kwargs)
+        self.register_buffer_or_parameter(
+            "grid_extend_x", torch.as_tensor(grid_extend_x, **self.factory_kwargs)
+        )
+        self.register_buffer_or_parameter(
+            "grid_extend_y", torch.as_tensor(grid_extend_y, **self.factory_kwargs)
+        )
+        self.register_buffer_or_parameter(
+            "grid_extend_tau", torch.as_tensor(grid_extend_tau, **self.factory_kwargs)
+        )
 
     def _deposit_charge_on_grid(
         self,
@@ -634,8 +635,7 @@ class SpaceChargeKick(Element):
                 energy=incoming.energy,
                 particle_charges=incoming.particle_charges,
                 survival_probabilities=incoming.survival_probabilities,
-                device=incoming.particles.device,
-                dtype=incoming.particles.dtype,
+                species=incoming.species,
             )
 
             return outgoing
@@ -651,7 +651,7 @@ class SpaceChargeKick(Element):
     def is_skippable(self) -> bool:
         return False
 
-    def plot(self, ax: plt.Axes, s: float, vector_idx: Optional[tuple] = None) -> None:
+    def plot(self, ax: plt.Axes, s: float, vector_idx: tuple | None = None) -> None:
         plot_s = s[vector_idx] if s.dim() > 0 else s
 
         ax.axvline(plot_s, ymin=0.01, ymax=0.99, color="orange", linestyle="-")

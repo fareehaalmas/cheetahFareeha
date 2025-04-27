@@ -6,9 +6,12 @@ import cheetah
 from cheetah.utils import is_mps_available_and_functional
 
 
-def test_fodo():
+@pytest.mark.parametrize(
+    "file_path",
+    ["tests/resources/fodo.lte", "tests/resources/fodo_semicolon_terminated.lte"],
+)
+def test_fodo(file_path: str):
     """Test importing a FODO lattice defined in the Elegant file format."""
-    file_path = "tests/resources/fodo.lte"
     converted = cheetah.Segment.from_elegant(file_path, "fodo")
 
     correct_lattice = cheetah.Segment(
@@ -132,3 +135,24 @@ def test_dtype_passing(dtype: torch.dtype):
     assert converted.d2.length.dtype == dtype
     assert converted.s1.length.dtype == dtype
     assert converted.s1.dipole_e1.dtype == dtype
+
+
+@pytest.mark.parametrize(
+    "default_torch_dtype", [torch.float32, torch.float64], indirect=True
+)
+def test_default_dtype(default_torch_dtype):
+    """Test that the default dtype is used if no explicit type is passed."""
+    file_path = "tests/resources/fodo.lte"
+
+    # Convert the lattice while passing the device
+    converted = cheetah.Segment.from_elegant(file_path, "fodo")
+
+    # Check that the properties of the loaded elements are of the correct dtype
+    assert converted.q1.length.dtype == default_torch_dtype
+    assert converted.q1.k1.dtype == default_torch_dtype
+    assert converted.q2.length.dtype == default_torch_dtype
+    assert converted.q2.k1.dtype == default_torch_dtype
+    assert [d.length.dtype for d in converted.d1] == [default_torch_dtype] * 2
+    assert converted.d2.length.dtype == default_torch_dtype
+    assert converted.s1.length.dtype == default_torch_dtype
+    assert converted.s1.dipole_e1.dtype == default_torch_dtype

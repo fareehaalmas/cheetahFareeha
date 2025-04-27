@@ -1,12 +1,11 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Optional
 
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
 
-from cheetah.particles import Beam, ParameterBeam, ParticleBeam
+from cheetah.particles import Beam, ParameterBeam, ParticleBeam, Species
 from cheetah.utils import UniqueNameGenerator
 
 generate_unique_name = UniqueNameGenerator(prefix="unnamed_element")
@@ -19,13 +18,18 @@ class Element(ABC, nn.Module):
     :param name: Unique identifier of the element.
     """
 
-    def __init__(self, name: Optional[str] = None, device=None, dtype=None) -> None:
+    def __init__(
+        self,
+        name: str | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         super().__init__()
 
         self.name = name if name is not None else generate_unique_name()
         self.register_buffer("length", torch.tensor(0.0, device=device, dtype=dtype))
 
-    def transfer_map(self, energy: torch.Tensor) -> torch.Tensor:
+    def transfer_map(self, energy: torch.Tensor, species: Species) -> torch.Tensor:
         r"""
         Generates the element's transfer map that describes how the beam and its
         particles are transformed when traveling through the element.
@@ -48,7 +52,8 @@ class Element(ABC, nn.Module):
         represented using a matrix multiplication, i.e. the augmented matrix as in an
         affine transformation.
 
-        :param energy: Reference energy of the Beam. Read from the fed-in Cheetah Beam.
+        :param energy: Reference energy of the beam. Read from the fed-in Cheetah beam.
+        :param species: Species of the particles in the beam
         :return: A 7x7 Matrix for further calculations.
         """
         raise NotImplementedError
@@ -62,27 +67,25 @@ class Element(ABC, nn.Module):
         :return: Beam of particles exiting the element.
         """
         if isinstance(incoming, ParameterBeam):
-            tm = self.transfer_map(incoming.energy)
-            mu = torch.matmul(tm, incoming._mu.unsqueeze(-1)).squeeze(-1)
-            cov = torch.matmul(tm, torch.matmul(incoming._cov, tm.transpose(-2, -1)))
+            tm = self.transfer_map(incoming.energy, incoming.species)
+            mu = torch.matmul(tm, incoming.mu.unsqueeze(-1)).squeeze(-1)
+            cov = torch.matmul(tm, torch.matmul(incoming.cov, tm.transpose(-2, -1)))
             return ParameterBeam(
                 mu,
                 cov,
                 incoming.energy,
                 total_charge=incoming.total_charge,
-                device=mu.device,
-                dtype=mu.dtype,
+                species=incoming.species.clone(),
             )
         elif isinstance(incoming, ParticleBeam):
-            tm = self.transfer_map(incoming.energy)
+            tm = self.transfer_map(incoming.energy, incoming.species)
             new_particles = torch.matmul(incoming.particles, tm.transpose(-2, -1))
             return ParticleBeam(
                 new_particles,
                 incoming.energy,
                 particle_charges=incoming.particle_charges,
                 survival_probabilities=incoming.survival_probabilities,
-                device=new_particles.device,
-                dtype=new_particles.dtype,
+                species=incoming.species.clone(),
             )
         else:
             raise TypeError(f"Parameter incoming is of invalid type {type(incoming)}")
@@ -100,6 +103,23 @@ class Element(ABC, nn.Module):
         elements.
         """
         raise NotImplementedError
+
+    def register_buffer_or_parameter(
+        self, name: str, value: torch.Tensor | nn.Parameter
+    ) -> None:
+        """
+        Register a buffer or parameter with the given name and value. Automatically
+        selects the correct method from `register_buffer` or `register_parameter` based
+        on the type of `value`.
+
+        :param name: Name of the buffer or parameter.
+        :param value: Value of the buffer or parameter.
+        :param default: Default value of the buffer.
+        """
+        if isinstance(value, nn.Parameter):
+            self.register_parameter(name, value)
+        else:
+            self.register_buffer(name, value)
 
     @property
     @abstractmethod
@@ -139,7 +159,7 @@ class Element(ABC, nn.Module):
         raise NotImplementedError
 
     @abstractmethod
-    def plot(self, ax: plt.Axes, s: float, vector_idx: Optional[tuple] = None) -> None:
+    def plot(self, ax: plt.Axes, s: float, vector_idx: tuple | None = None) -> None:
         """
         Plot a representation of this element into a `matplotlib` Axes at position `s`.
 

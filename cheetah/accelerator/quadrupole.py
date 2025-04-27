@@ -1,18 +1,15 @@
-from typing import Literal, Optional
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import torch
 from matplotlib.patches import Rectangle
-from scipy.constants import physical_constants
 
 from cheetah.accelerator.element import Element
-from cheetah.particles import Beam, ParticleBeam
+from cheetah.particles import Beam, ParticleBeam, Species
 from cheetah.track_methods import base_rmatrix, misalignment_matrix
 from cheetah.utils import UniqueNameGenerator, bmadx, verify_device_and_dtype
 
 generate_unique_name = UniqueNameGenerator(prefix="unnamed_element")
-
-electron_mass_eV = physical_constants["electron mass energy equivalent in MeV"][0] * 1e6
 
 
 class Quadrupole(Element):
@@ -33,14 +30,14 @@ class Quadrupole(Element):
     def __init__(
         self,
         length: torch.Tensor,
-        k1: Optional[torch.Tensor] = None,
-        misalignment: Optional[torch.Tensor] = None,
-        tilt: Optional[torch.Tensor] = None,
+        k1: torch.Tensor | None = None,
+        misalignment: torch.Tensor | None = None,
+        tilt: torch.Tensor | None = None,
         num_steps: int = 1,
         tracking_method: Literal["cheetah", "bmadx"] = "cheetah",
-        name: Optional[str] = None,
-        device=None,
-        dtype=None,
+        name: str | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         device, dtype = verify_device_and_dtype(
             [length, k1, misalignment, tilt], device, dtype
@@ -48,26 +45,31 @@ class Quadrupole(Element):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__(name=name, **factory_kwargs)
 
-        self.register_buffer("k1", torch.tensor(0.0, **factory_kwargs))
-        self.register_buffer("misalignment", torch.tensor((0.0, 0.0), **factory_kwargs))
-        self.register_buffer("tilt", torch.tensor(0.0, **factory_kwargs))
-
         self.length = torch.as_tensor(length, **factory_kwargs)
-        if k1 is not None:
-            self.k1 = torch.as_tensor(k1, **factory_kwargs)
-        if misalignment is not None:
-            self.misalignment = torch.as_tensor(misalignment, **factory_kwargs)
-        if tilt is not None:
-            self.tilt = torch.as_tensor(tilt, **factory_kwargs)
+
+        self.register_buffer_or_parameter(
+            "k1", torch.as_tensor(k1 if k1 is not None else 0.0, **factory_kwargs)
+        )
+        self.register_buffer_or_parameter(
+            "misalignment",
+            torch.as_tensor(
+                misalignment if misalignment is not None else (0.0, 0.0),
+                **factory_kwargs,
+            ),
+        )
+        self.register_buffer_or_parameter(
+            "tilt", torch.as_tensor(tilt if tilt is not None else 0.0, **factory_kwargs)
+        )
 
         self.num_steps = num_steps
         self.tracking_method = tracking_method
 
-    def transfer_map(self, energy: torch.Tensor) -> torch.Tensor:
+    def transfer_map(self, energy: torch.Tensor, species: Species) -> torch.Tensor:
         R = base_rmatrix(
             length=self.length,
             k1=self.k1,
             hx=torch.zeros_like(self.length),
+            species=species,
             tilt=self.tilt,
             energy=energy,
         )
@@ -114,10 +116,9 @@ class Quadrupole(Element):
         py = incoming.py
         tau = incoming.tau
         delta = incoming.p
+        mc2 = incoming.species.mass_eV
 
-        z, pz, p0c = bmadx.cheetah_to_bmad_z_pz(
-            tau, delta, incoming.energy, electron_mass_eV
-        )
+        z, pz, p0c = bmadx.cheetah_to_bmad_z_pz(tau, delta, incoming.energy, mc2)
 
         x_offset = self.misalignment[..., 0]
         y_offset = self.misalignment[..., 1]
@@ -154,9 +155,7 @@ class Quadrupole(Element):
 
             x, px, y, py = x_next, px_next, y_next, py_next
 
-            z = z + bmadx.low_energy_z_correction(
-                pz, p0c, electron_mass_eV, step_length
-            )
+            z = z + bmadx.low_energy_z_correction(pz, p0c, mc2, step_length)
 
         # s = s + l
         x, px, y, py = bmadx.offset_particle_unset(
@@ -168,9 +167,7 @@ class Quadrupole(Element):
         # End of Bmad-X tracking
 
         # Convert back to Cheetah coordinates
-        tau, delta, ref_energy = bmadx.bmad_to_cheetah_z_pz(
-            z, pz, p0c, electron_mass_eV
-        )
+        tau, delta, ref_energy = bmadx.bmad_to_cheetah_z_pz(z, pz, p0c, mc2)
 
         outgoing_beam = ParticleBeam(
             particles=torch.stack(
@@ -179,8 +176,7 @@ class Quadrupole(Element):
             energy=ref_energy,
             particle_charges=incoming.particle_charges,
             survival_probabilities=incoming.survival_probabilities,
-            device=incoming.particles.device,
-            dtype=incoming.particles.dtype,
+            species=incoming.species,
         )
         return outgoing_beam
 
@@ -190,7 +186,7 @@ class Quadrupole(Element):
 
     @property
     def is_active(self) -> bool:
-        return torch.any(self.k1 != 0)
+        return torch.any(self.k1 != 0).item()
 
     def split(self, resolution: torch.Tensor) -> list[Element]:
         num_splits = torch.ceil(torch.max(self.length) / resolution).int()
@@ -208,7 +204,7 @@ class Quadrupole(Element):
             for i in range(num_splits)
         ]
 
-    def plot(self, ax: plt.Axes, s: float, vector_idx: Optional[tuple] = None) -> None:
+    def plot(self, ax: plt.Axes, s: float, vector_idx: tuple | None = None) -> None:
         plot_k1 = self.k1[vector_idx] if self.k1.dim() > 0 else self.k1
         plot_s = s[vector_idx] if s.dim() > 0 else s
         plot_length = self.length[vector_idx] if self.length.dim() > 0 else self.length
@@ -222,7 +218,13 @@ class Quadrupole(Element):
 
     @property
     def defining_features(self) -> list[str]:
-        return super().defining_features + ["length", "k1", "misalignment", "tilt"]
+        return super().defining_features + [
+            "length",
+            "k1",
+            "misalignment",
+            "tilt",
+            "tracking_method",
+        ]
 
     def __repr__(self) -> str:
         return (
